@@ -10,6 +10,7 @@ from nltk.tokenize import word_tokenize
 from collections import Counter
 import numpy as np
 from tqdm import tqdm
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 nltk.download('punkt')
 nltk.download('punkt_tab')
@@ -64,49 +65,120 @@ print("Label distribution:")
 print(df['label'].value_counts(normalize=True))
 
 class LSTMClassifier(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_dim):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers=3):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, bidirectional=True, num_layers=2, dropout=0.3)
+        self.embed_dropout = nn.Dropout(0.2)
         
-        
-        self.feature_net = nn.Sequential(
-            nn.Linear(2, 64),
-            nn.LeakyReLU(),
-            nn.LayerNorm(64),
-            nn.Linear(64, hidden_dim*2)
+        self.word_lstm = nn.LSTM(
+            embed_dim, hidden_dim, 
+            num_layers=num_layers, 
+            bidirectional=True, 
+            dropout=0.3 if num_layers > 1 else 0,
+            batch_first=True
         )
         
         
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim*4, 128),
+        self.word_attention = nn.Sequential(
+            nn.Linear(2*hidden_dim, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1),
+            nn.Softmax(dim=1)
+        )
+
+        
+        self.sent_lstm = nn.LSTM(
+            2*hidden_dim, hidden_dim,
+            num_layers=num_layers,
+            bidirectional=True,
+            dropout=0.3 if num_layers > 1 else 0,
+            batch_first=True
+        )
+        
+        
+        self.sent_attention = nn.Sequential(
+            nn.Linear(2*hidden_dim, 128),
             nn.Tanh(),
             nn.Linear(128, 1),
             nn.Softmax(dim=1)
         )
         
+        
+        self.feature_net = nn.Sequential(
+            nn.Linear(2, 128),
+            nn.LeakyReLU(0.1),
+            nn.LayerNorm(128),
+            nn.Dropout(0.3),
+            nn.Linear(128, 256),
+            nn.LeakyReLU(0.1),
+            nn.LayerNorm(256),
+            nn.Dropout(0.3),
+            nn.Linear(256, 2*hidden_dim)
+        )
+        
+        
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim*4, 64),
-            nn.LeakyReLU(),
+            nn.Linear(4*hidden_dim, 256),
+            nn.LeakyReLU(0.1),
+            nn.LayerNorm(256),
             nn.Dropout(0.4),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.1),
+            nn.LayerNorm(128),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.LeakyReLU(0.1),
+            nn.LayerNorm(64),
+            nn.Dropout(0.2),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
-
-    def forward(self, x, upvotes, sentiment):
         
-        embeds = self.embedding(x)
-        lstm_out, _ = self.lstm(embeds)
-        text_features = lstm_out.mean(dim=1)  
+        
+        self.init_weights()
+    
+    def init_weights(self):
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                if 'lstm' in name:
+                    for i in range(0, param.size(0), self.hidden_dim):
+                        nn.init.xavier_uniform_(param[i:i+self.hidden_dim])
+                elif 'embedding' not in name:
+                    nn.init.xavier_uniform_(param)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0.0)
+    
+    def forward(self, x, lengths, upvotes, sentiment):
+        x = self.embedding(x)
+        x = self.embed_dropout(x)
+        
+        packed = pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False)
+        word_out, _ = self.word_lstm(packed)
+        word_out, _ = pad_packed_sequence(word_out, batch_first=True)
+        
+        word_attn = self.word_attention(word_out)
+        word_attn = torch.transpose(word_attn, 1, 2)
+        word_attn_vectors = torch.bmm(word_attn, word_out).squeeze(1)
+        
+        sent_out, _ = self.sent_lstm(word_out)
+        
+        sent_attn = self.sent_attention(sent_out)
+        sent_attn = torch.transpose(sent_attn, 1, 2)
+        sent_attn_vectors = torch.bmm(sent_attn, sent_out).squeeze(1)
+        
+        text_features = torch.cat([word_attn_vectors, sent_attn_vectors], dim=1)
         
         features = torch.stack([upvotes, sentiment], dim=1)
         processed_features = self.feature_net(features)
         
         combined = torch.cat([text_features, processed_features], dim=1)
-        attention_weights = self.attention(combined)
-        weighted = combined * attention_weights
         
-        return self.classifier(weighted).squeeze()
+
+        return self.classifier(combined).squeeze()
     
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = LSTMClassifier(
