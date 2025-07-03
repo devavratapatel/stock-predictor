@@ -9,6 +9,13 @@ import pandas as pd
 import numpy as np
 from textblob import TextBlob
 from model import LSTMClassifier
+import nltk
+from nltk.tokenize import word_tokenize
+nltk.download('punkt')
+nltk.download('punkt_tab')
+import pandas as pd
+from collections import Counter, defaultdict
+import matplotlib.pyplot as plt
 load_dotenv()
 
 reddit = praw.Reddit(
@@ -51,12 +58,7 @@ df["sentiment"] = df["full_text"].apply(lambda x: TextBlob(x).sentiment.polarity
 
 df.to_csv("predict_data.csv",index=False)
 
-import nltk
-from nltk.tokenize import word_tokenize
-nltk.download('punkt')
-nltk.download('punkt_tab')
-import pandas as pd
-from collections import Counter
+
 
 df = pd.read_csv("C:/Users/Devavrata/proproject/predict_data.csv")
 
@@ -119,8 +121,7 @@ print(f"Std: {df['prediction_prob'].std():.4f}")
 
 if df['prediction_prob'].nunique() == 1:
     print("\nWARNING: All predictions are identical!")
-from collections import defaultdict
-import matplotlib.pyplot as plt
+
 
 df["tickers"] = df["tickers"].apply(lambda x: eval(x) if isinstance(x, str) else[])
 df["impact"] = (
